@@ -23,6 +23,7 @@ parser = argparse.ArgumentParser(description="run")
 parser.add_argument('--path_video', type=str, default='/Users/alekseikurnosov/Documents/GitHub/EMO-AffectNetModel/video/', help='Path to all videos')
 parser.add_argument('--path_save', type=str, default='report/', help='Path to save the report')
 parser.add_argument('--conf_d', type=float, default=0.7, help='Elimination threshold for false face areas')
+parser.add_argument('--instant_result', type=str, default='report/emo.emo', help='The file to write minireports')
 parser.add_argument('--path_FE_model', type=str, default='models/EmoAffectnet/weights_0_66_37_wo_gl.h5',
                     help='Path to a model for feature extraction')
 parser.add_argument('--path_LSTM_model', type=str, default='models/LSTM/SAVEE_with_config.h5',
@@ -135,20 +136,51 @@ def start_pred_camera():
     LSTM_model = load_weights_LSTM(args.path_LSTM_model)
     save_video_path = os.path.join(args.path_video, "output.mp4")
     #print("In params save_video_path: ", save_video_path)
-    detect = get_face_areas.VideoCamera(conf=0.5)
+    conf_int = 1
+    detect = get_face_areas.VideoCamera(conf=0.7)
     detect.init_camera()
     needStop = False
+
+    mode = 0
+    prev_mode = -1
+    
     while not needStop:
         current_frame = detect.get_current_camera_frame()
         if len(current_frame) > 0:
             df, mode = predict(current_frame, 1)
-            #predict = 
-            print("mood: ", label_model[mode], "predict: ", df.values.tolist()[0])
+            predicted_weights = df.values.tolist()[0][1: ]
+            if predicted_weights[mode] < conf_int * 0.1:
+                mode = 0
+            predicted = list(map(lambda probability: round(probability, 2), predicted_weights))
+
+            print("mood: ", label_model[mode], "predict: ", predicted)
+        else:
+            mode = 0
+
+        if mode != prev_mode:
+            prev_mode = mode
+            save_minireport(mode)
+
         key = cv2.waitKey(20)
-        if key == 27:
-            needStop = True
+        match key:
+            case 61:
+                if conf_int < 9:
+                    conf_int += 1
+                    print(">>>>conf is set to, ", 0.1 * conf_int)
+            case 45:
+                if conf_int > 1:
+                    conf_int -= 1
+                    print(">>>>conf is set to, ", 0.1 * conf_int)
+            case 27:
+                needStop = True
     
     detect.save_result()
+
+def save_minireport(mode):
+    print("emo_path:", args.instant_result)
+    f = open(args.instant_result, "w")
+    f.write(str(mode))
+    f.close()
         
 if __name__ == "__main__":
     #pred_all_video()
