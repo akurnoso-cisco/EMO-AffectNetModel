@@ -18,7 +18,7 @@ class VideoCamera(object):
         self.font = cv2.FONT_HERSHEY_SIMPLEX
         self.cur_frame = 0
         self.video = None
-        self.detector = RetinaFace(gpu_id=0)
+        self.detector = RetinaFace()
 
     def __del__(self):
         self.video.release()

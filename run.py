@@ -8,33 +8,93 @@ from functions import sequences
 from functions import get_face_areas
 from functions.get_models import load_weights_EE, load_weights_LSTM
 
+import cv2
+
+import threading
+import termios
+import contextlib
+import sys
+
 import warnings
 warnings.filterwarnings('ignore', category = FutureWarning)
 
 parser = argparse.ArgumentParser(description="run")
 
-parser.add_argument('--path_video', type=str, default='video/', help='Path to all videos')
+parser.add_argument('--path_video', type=str, default='/Users/alekseikurnosov/Documents/GitHub/EMO-AffectNetModel/video/', help='Path to all videos')
 parser.add_argument('--path_save', type=str, default='report/', help='Path to save the report')
 parser.add_argument('--conf_d', type=float, default=0.7, help='Elimination threshold for false face areas')
 parser.add_argument('--path_FE_model', type=str, default='models/EmoAffectnet/weights_0_66_37_wo_gl.h5',
                     help='Path to a model for feature extraction')
-parser.add_argument('--path_LSTM_model', type=str, default='models/LSTM/RAVDESS_with_config.h5',
+parser.add_argument('--path_LSTM_model', type=str, default='models/LSTM/SAVEE_with_config.h5',
                     help='Path to a model for emotion prediction')
 
 args = parser.parse_args()
 
+needStop = False
+
+label_model = ['Neutral', 'Happiness', 'Sadness', 'Surprise', 'Fear', 'Disgust', 'Anger']
+
+@contextlib.contextmanager
+def raw_mode(file):
+    old_attrs = termios.tcgetattr(file.fileno())
+    new_attrs = old_attrs[:]
+    new_attrs[3] = new_attrs[3] & ~(termios.ECHO | termios.ICANON)
+    try:
+        termios.tcsetattr(file.fileno(), termios.TCSADRAIN, new_attrs)
+        yield
+    finally:
+        termios.tcsetattr(file.fileno(), termios.TCSADRAIN, old_attrs)
+
+def key_listen():
+    global needStop
+    print('Stop with Q')
+    with raw_mode(sys.stdin):
+        try:
+            while True:
+                ch = sys.stdin.read(1)
+                if not ch or ch == 'q' or ch == 'Q':
+                    break
+        except (KeyboardInterrupt, EOFError):
+            pass
+        
+    needStop = True
+
 def pred_one_video(path):
     start_time = time.time()
-    label_model = ['Neutral', 'Happiness', 'Sadness', 'Surprise', 'Fear', 'Disgust', 'Anger']
     detect = get_face_areas.VideoCamera(path_video=path, conf=args.conf_d)
-    dict_face_areas, total_frame = detect.get_frame()
+    dict_face_areas, total_frame = detect.get_frames()
+
+    if not os.path.exists(args.path_save):
+        os.makedirs(args.path_save)
+        
+    filename = os.path.basename(path)[:-4] + '.csv'
+    
+    df, mode = predict(dict_face_areas, total_frame)
+
+    df.to_csv(os.path.join(args.path_save,filename), index=False)
+    end_time = time.time() - start_time
+    
+    print('Report saved in: ', os.path.join(args.path_save,filename))
+    print('Predicted emotion: ', label_model[mode])
+    print('Lead time: {} s'.format(np.round(end_time, 2)))
+    print()
+
+def predict(dict_face_areas, total_frame):
     name_frames = list(dict_face_areas.keys())
     face_areas = list(dict_face_areas.values())
+    #print("----------------")
+    #print("name_frames: ", name_frames)
+    #print("----------------")
+    #print("face_areas in stack: ", np.stack(face_areas))
+    #print("----------------")
     EE_model = load_weights_EE(args.path_FE_model)
     LSTM_model = load_weights_LSTM(args.path_LSTM_model)
     features = EE_model(np.stack(face_areas))
     seq_paths, seq_features = sequences.sequences(name_frames, features)
     pred = LSTM_model(np.stack(seq_features)).numpy()
+    #print("pred: ", pred)
+    #print("----------------")
+
     all_pred = []
     all_path = []
     for id, c_p in enumerate(seq_paths):
@@ -46,28 +106,60 @@ def pred_one_video(path):
     m_p = [all_pred[-1]]*len(m_f)
     
     df=pd.DataFrame(data=all_pred+m_p, columns=label_model)
+
+    #print("----------------")
+    #print("df from pd.DataFrame: ", df)
     df['frame'] = all_path+m_f
-    df = df[['frame']+ label_model]
+    df = df[['frame']+ label_model] 
+    #print("----------------")
+    #print("df before grouping: ", df)
     df = sequences.df_group(df, label_model)
-    
-    if not os.path.exists(args.path_save):
-        os.makedirs(args.path_save)
-        
-    filename = os.path.basename(path)[:-4] + '.csv'
-    df.to_csv(os.path.join(args.path_save,filename), index=False)
-    end_time = time.time() - start_time
+    #print("----------------")
+    #print("df: ", df)
+    #print("----------------")
+
     mode = stats.mode(np.argmax(pred, axis=1))[0]
-    print('Report saved in: ', os.path.join(args.path_save,filename))
-    print('Predicted emotion: ', label_model[mode])
-    print('Lead time: {} s'.format(np.round(end_time, 2)))
-    print()
+    return (df, mode)
 
 def pred_all_video():
     path_all_videos = os.listdir(args.path_video)
     for id, cr_path in enumerate(path_all_videos):
-        print('{}/{}'.format(id+1, len(path_all_videos)))
-        pred_one_video(os.path.join(args.path_video,cr_path))
+        if "video" in cr_path:
+            print('{}/{}'.format(id+1, len(path_all_videos)))
+            pred_one_video(os.path.join(args.path_video,cr_path))
         
+def start_pred_camera():
+    start_time = time.time()
+    label_model = ['Neutral', 'Happiness', 'Sadness', 'Surprise', 'Fear', 'Disgust', 'Anger']
+    EE_model = load_weights_EE(args.path_FE_model)
+    LSTM_model = load_weights_LSTM(args.path_LSTM_model)
+    save_video_path = os.path.join(args.path_video, "output.mp4")
+    #print("In params save_video_path: ", save_video_path)
+    detect = get_face_areas.VideoCamera(conf=0.5)
+    detect.init_camera()
+    needStop = False
+    while not needStop:
+        current_frame = detect.get_current_camera_frame()
+        if len(current_frame) > 0:
+            df, mode = predict(current_frame, 1)
+            #predict = 
+            print("mood: ", label_model[mode], "predict: ", df.values.tolist()[0])
+        key = cv2.waitKey(20)
+        if key == 27:
+            needStop = True
+    
+    detect.save_result()
         
 if __name__ == "__main__":
-    pred_all_video()
+    #pred_all_video()
+    start_pred_camera()
+    #key_listen()
+
+    #t1 = threading.Thread(target=key_listen)
+    #t2 = threading.Thread(target=start_pred_camera)
+
+    #t1.start()
+    #t2.start()
+
+    #t1.join()
+    #t2.join()
